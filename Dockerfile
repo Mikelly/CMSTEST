@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS publish
 WORKDIR /src
 COPY ["CMS/CMS.csproj", "CMS/"]
 RUN dotnet restore "CMS/CMS.csproj"
