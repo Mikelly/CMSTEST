@@ -1,0 +1,187 @@
+@{
+    ViewData["Title"] = "Parking zone — Opština Bar";
+}
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+
+<div class="container-fluid py-3">
+    <h4 class="mb-3">Parking zone — Opština Bar</h4>
+
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+        <span class="badge px-3 py-2" style="background:#1E88E5">&#9632; Parking zona</span>
+        <span class="badge px-3 py-2" style="background:#43A047">&#9632; Zelena zona</span>
+        <span class="badge px-3 py-2" style="background:#E53935">&#9632; Zabranjeno parkiranje</span>
+        <span class="text-muted small ms-2">Koristite alat za crtanje poligona na mapi</span>
+    </div>
+
+    <div id="map" style="height:60vh;border-radius:8px;border:1px solid #dee2e6;"></div>
+
+    <div class="mt-4">
+        <h5>Sve zone</h5>
+        <table class="table table-sm table-hover">
+            <thead class="table-light">
+                <tr>
+                    <th>Naziv</th>
+                    <th>Tip</th>
+                    <th>Status</th>
+                    <th>Kreirana</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="zonesTbody"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Modal za novu zonu -->
+<div class="modal fade" id="novaZonaModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Nova parking zona</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label fw-semibold">Naziv zone</label>
+                    <input type="text" class="form-control" id="zonaNaziv" placeholder="npr. Zona A - Centar">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-semibold">Tip zone</label>
+                    <select class="form-select" id="zonaTip">
+                        <option value="1">Parking zona</option>
+                        <option value="2">Zelena zona</option>
+                        <option value="3">Zabranjeno parkiranje</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="btnOdustani" data-bs-dismiss="modal">Odustani</button>
+                <button type="button" class="btn btn-primary" id="btnSacuvaj">Sačuvaj zonu</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script>
+const BOJE = {
+    1: { color: '#1565C0', fillColor: '#1E88E5', weight: 2, fillOpacity: 0.35 },
+    2: { color: '#2E7D32', fillColor: '#43A047', weight: 2, fillOpacity: 0.35 },
+    3: { color: '#B71C1C', fillColor: '#E53935', weight: 2, fillOpacity: 0.35 }
+};
+const TIP_NAZIV = { 1: 'Parking zona', 2: 'Zelena zona', 3: 'Zabranjeno parkiranje' };
+
+const map = L.map('map').setView([42.0944, 19.0978], 14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+const drawnItems = new L.FeatureGroup().addTo(map);
+
+const drawControl = new L.Control.Draw({
+    edit: { featureGroup: drawnItems, edit: false, remove: false },
+    draw: {
+        polygon: { shapeOptions: { color: '#666', fillOpacity: 0.2 } },
+        polyline: false, rectangle: false, circle: false,
+        circlemarker: false, marker: false
+    }
+}).addTo(map);
+
+let pendingLayer = null;
+const modal = new bootstrap.Modal(document.getElementById('novaZonaModal'));
+const zonaLayers = {};
+
+map.on(L.Draw.Event.CREATED, e => {
+    pendingLayer = e.layer;
+    drawnItems.addLayer(pendingLayer);
+    document.getElementById('zonaNaziv').value = '';
+    modal.show();
+});
+
+document.getElementById('btnOdustani').addEventListener('click', () => {
+    if (pendingLayer) { drawnItems.removeLayer(pendingLayer); pendingLayer = null; }
+});
+
+document.getElementById('btnSacuvaj').addEventListener('click', async () => {
+    const naziv = document.getElementById('zonaNaziv').value.trim();
+    const tip = parseInt(document.getElementById('zonaTip').value);
+    if (!naziv) { alert('Unesite naziv zone.'); return; }
+
+    const geometrija = pendingLayer.toGeoJSON().geometry;
+    const res = await fetch('/api/parkingzone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ naziv, tip, geometrija })
+    });
+
+    if (res.ok) {
+        drawnItems.removeLayer(pendingLayer);
+        pendingLayer = null;
+        modal.hide();
+        await ucitajZone();
+    } else {
+        alert('Greška pri čuvanju zone.');
+    }
+});
+
+async function ucitajZone() {
+    const res = await fetch('/api/parkingzone');
+    const fc = await res.json();
+
+    Object.values(zonaLayers).forEach(l => map.removeLayer(l));
+    for (const k in zonaLayers) delete zonaLayers[k];
+
+    const tbody = document.getElementById('zonesTbody');
+    tbody.innerHTML = '';
+
+    if (!fc.features?.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">Nema unesenih zona</td></tr>';
+        return;
+    }
+
+    fc.features.forEach(f => {
+        const p = f.properties;
+        const boja = BOJE[p.tip] ?? BOJE[1];
+        const stil = p.aktivna ? boja : { ...boja, fillOpacity: 0.07, opacity: 0.3 };
+
+        const layer = L.geoJSON(f, { style: () => stil });
+        layer.bindTooltip(p.naziv, { permanent: false });
+        layer.addTo(map);
+        zonaLayers[p.id] = layer;
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td>${p.naziv}</td>
+            <td><span class="badge" style="background:${boja.fillColor}">${TIP_NAZIV[p.tip]}</span></td>
+            <td>${p.aktivna
+                ? '<span class="badge bg-success">Aktivna</span>'
+                : '<span class="badge bg-secondary">Neaktivna</span>'}</td>
+            <td>${new Date(p.kreiranaNa).toLocaleDateString('sr-Latn-ME')}</td>
+            <td class="text-end">
+                <button class="btn btn-sm btn-outline-secondary me-1"
+                    onclick="toggleZona(${p.id})">${p.aktivna ? 'Deaktiviraj' : 'Aktiviraj'}</button>
+                <button class="btn btn-sm btn-outline-danger"
+                    onclick="obrisiZonu(${p.id})">Obriši</button>
+            </td>`;
+        tbody.appendChild(tr);
+    });
+}
+
+async function toggleZona(id) {
+    await fetch(`/api/parkingzone/${id}/toggle`, { method: 'PATCH' });
+    await ucitajZone();
+}
+
+async function obrisiZonu(id) {
+    if (!confirm('Obrisati zonu?')) return;
+    await fetch(`/api/parkingzone/${id}`, { method: 'DELETE' });
+    await ucitajZone();
+}
+
+ucitajZone();
+</script>
+}
